@@ -4,12 +4,22 @@ import traceback
 from typing import Optional
 
 import comtypes.client
+import comtypes.gen.SAP2000v1 as SAP2000
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # SAP2000 constants
+class eMatType:
+    eMatType_Steel = 1
+    eMatType_Concrete = 2
+    eMatType_NoDesign = 3
+    eMatType_Aluminum = 4
+    eMatType_ColdFormed = 5
+    eMatType_Rebar = 6
+    eMatType_Tendon = 7
+
 class e3DFrameType:
     OpenFrame = 0
     PerimeterFrame = 1
@@ -54,18 +64,55 @@ class SAPTest:
 
             # Define material properties
             try:
-                self.sap_model.PropMaterial.SetMaterial("CONC", 2)  # 2 = Concrete
-                self.sap_model.PropMaterial.SetMPIsotropic("CONC", 3600, 0.2, 0.0000055)  # E=3600 ksi, v=0.2
-                self.sap_model.PropMaterial.SetWeightAndMass("CONC", 1, 0.15)  # Unit weight = 150 pcf
+                # Define A992Fy50 steel material
+                ret = self.sap_model.PropMaterial.SetMaterial("A992Fy50", 1)
+                if ret != 0:
+                    logger.warning(f"SetMaterial returned {ret}")
+                    
+                self.sap_model.PropMaterial.SetMPIsotropic("A992Fy50", 4176000.0, 0.3, 0.00000650)  
+                # Elastic (isotropic) properties from dialog:
+                # E = 4176000.0 (Modulus Of Elasticity)
+                # U = 0.3 (Poisson's Ratio)
+                # A = 6.500E-06 (Coefficient Of Thermal Expansion)
+                self.sap_model.PropMaterial.SetWeightAndMass("A992Fy50", 0.49, 0.0152)  # Mass per Unit Volume = 0.0152
+                
+                # Set additional steel properties
+                self.sap_model.PropMaterial.SetOSteel_1("A992Fy50", 7200.0, 9350.0, 7920.0, 10296.0)
+                # Fy = 7200.0 (Minimum Yield Stress)
+                # Fu = 9350.0 (Minimum Tensile Stress)
+                # Fye = 7920.0 (Expected Yield Stress)
+                # Fue = 10296.0 (Expected Tensile Stress)
+                
                 logger.info("Material properties defined successfully")
             except Exception as e:
                 logger.warning(f"Error defining material properties: {e}")
                 # Continue anyway - SAP2000 should use defaults
 
+            # Define load patterns
+            try:
+                # Define DEAD load pattern with self-weight
+                self.sap_model.LoadPatterns.Add("DEAD", 1, 1.0)  # 1 = Dead, self-weight multiplier = 1.0
+
+                # Define LIVE load pattern without self-weight
+                self.sap_model.LoadPatterns.Add("LIVE", 3, 0.0)  # 3 = Live, self-weight multiplier = 0.0
+
+                # Try to remove MODAL load pattern if it exists. Modal analysis is typically used for dynamic analysis,
+                # Note: This may fail if MODAL is assigned to a load case
+                try:
+                    ret = self.sap_model.LoadPatterns.Delete("MODAL")
+                    if ret != 0:
+                        logger.warning("Could not delete MODAL load pattern - it may be assigned to a load case")
+                except Exception as modal_err:
+                    logger.warning(f"Error trying to delete MODAL load pattern: {modal_err}")
+
+                logger.info("Load patterns configured successfully")
+            except Exception as e:
+                logger.warning(f"Failed to configure load patterns: {e}")
+
             # Define frame sections
             try:
-                self.sap_model.PropFrame.SetRectangle("COLUMN", "CONC", 2, 2)  # 24" x 24" column
-                self.sap_model.PropFrame.SetRectangle("BEAM", "CONC", 1.5, 1)  # 18" x 12" beam
+                self.sap_model.PropFrame.SetRectangle("COLUMN", "A992Fy50", 2, 2)  # 24" x 24" column
+                self.sap_model.PropFrame.SetRectangle("BEAM", "A992Fy50", 1.5, 1)  # 18" x 12" beam
                 logger.info("Frame sections defined successfully")
             except Exception as e:
                 logger.warning(f"Error defining frame sections: {e}")
