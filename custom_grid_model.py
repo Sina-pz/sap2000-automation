@@ -10,15 +10,15 @@ import comtypes.gen.SAP2000v1 as SAP2000
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# SAP2000 constants
-class eMatType:
-    eMatType_Steel = 1
-    eMatType_Concrete = 2
-    eMatType_NoDesign = 3
-    eMatType_Aluminum = 4
-    eMatType_ColdFormed = 5
-    eMatType_Rebar = 6
-    eMatType_Tendon = 7
+# # SAP2000 constants
+# class eMatType:
+#     eMatType_Steel = 1
+#     eMatType_Concrete = 2
+#     eMatType_NoDesign = 3
+#     eMatType_Aluminum = 4
+#     eMatType_ColdFormed = 5
+#     eMatType_Rebar = 6
+#     eMatType_Tendon = 7
 
 class e3DFrameType:
     OpenFrame = 0
@@ -65,19 +65,23 @@ class SAPTest:
             # Define material properties
             try:
                 # Define A992Fy50 steel material
-                ret = self.sap_model.PropMaterial.SetMaterial("A992Fy50", 1)
-                if ret != 0:
-                    logger.warning(f"SetMaterial returned {ret}")
-                    
-                self.sap_model.PropMaterial.SetMPIsotropic("A992Fy50", 4176000.0, 0.3, 0.00000650)  
+                #logger.info(f"hi0 {SAP2000.eMatType_Steel}")
+                #logger.info(f"hi1 {SAP2000.eMatType}")
+                self.sap_model.PropMaterial.SetMaterial("Steel", int(SAP2000.eMatType_Steel))
+                self.sap_model.PropMaterial.SetMPIsotropic("Steel", float(4176000.0), float(0.3), float(0.00000650))
+                #logger.info(f" SetMPIsotropic")
                 # Elastic (isotropic) properties from dialog:
                 # E = 4176000.0 (Modulus Of Elasticity)
                 # U = 0.3 (Poisson's Ratio)
                 # A = 6.500E-06 (Coefficient Of Thermal Expansion)
-                self.sap_model.PropMaterial.SetWeightAndMass("A992Fy50", 0.49, 0.0152)  # Mass per Unit Volume = 0.0152
-                
+                self.sap_model.PropMaterial.SetMPIsotropic(str("Steel"), float(4176000.0), float(0.3), float(6.5e-6))
+                logger.info(f" SetMPIsotropic")
+                # Mass per Unit Volume = 0.0152
+               
                 # Set additional steel properties
-                self.sap_model.PropMaterial.SetOSteel_1("A992Fy50", 7200.0, 9350.0, 7920.0, 10296.0)
+                # SSType =1 is for a simple bilinear stress-strain curve — appropriate unless you're defining a custom multilinear curve.
+                # self.sap_model.PropMaterial.SetOSteel_1(str("Steel"), int(1), float(7200.0), float(9350.0), float(7920.0), float(10296.0))
+                # logger.info(f" SetOSteel_1")
                 # Fy = 7200.0 (Minimum Yield Stress)
                 # Fu = 9350.0 (Minimum Tensile Stress)
                 # Fye = 7920.0 (Expected Yield Stress)
@@ -90,20 +94,26 @@ class SAPTest:
 
             # Define load patterns
             try:
+                self.sap_model.LoadPatterns.Delete("MODAL")
+                logger.info(f" load {SAP2000.eLoadPatternType}")
+                # for attr in dir(SAP2000.eLoadPatternType):
+                #     if not attr.startswith("_"):
+                #         value = getattr(SAP2000.eLoadPatternType, attr)
+                #         if isinstance(value, int):
+                #             logger.info(f"{attr} = {value}")
+                logger.info(f" load {int(SAP2000.eLoadPatternType_Dead)}")
+                logger.info(f" load {int(SAP2000.eLoadPatternType.eLoadPatternType_Dead)}")
                 # Define DEAD load pattern with self-weight
-                self.sap_model.LoadPatterns.Add("DEAD", 1, 1.0)  # 1 = Dead, self-weight multiplier = 1.0
-
+                self.sap_model.LoadPatterns.Add("DEAD", int(SAP2000.eLoadPatternType_Dead), 1.0)  # 1 = Dead, 
+                #SAP2000.eLoadPatternType.Dead resolves to 1, which is correct.
+                # The third argument 1.0 means full self-weight is included.
+                # The fourth argument True adds a linear static load case for this pattern.
+                #      self-weight multiplier = 1.0
+                logger.info(f" DEAD")
                 # Define LIVE load pattern without self-weight
-                self.sap_model.LoadPatterns.Add("LIVE", 3, 0.0)  # 3 = Live, self-weight multiplier = 0.0
-
+                self.sap_model.LoadPatterns.Add("LIVE", int(SAP2000.eLoadPatternType_Live), 0.0)  # 3 = Live, self-weight multiplier = 0.0
+                logger.info(f" LIVE")
                 # Try to remove MODAL load pattern if it exists. Modal analysis is typically used for dynamic analysis,
-                # Note: This may fail if MODAL is assigned to a load case
-                try:
-                    ret = self.sap_model.LoadPatterns.Delete("MODAL")
-                    if ret != 0:
-                        logger.warning("Could not delete MODAL load pattern - it may be assigned to a load case")
-                except Exception as modal_err:
-                    logger.warning(f"Error trying to delete MODAL load pattern: {modal_err}")
 
                 logger.info("Load patterns configured successfully")
             except Exception as e:
