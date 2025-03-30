@@ -154,24 +154,16 @@ class SAPTest:
                         except Exception as col_sec_err:
                             logger.warning(f"Could not set section for column {col_name}: {col_sec_err}")
                         
-                        # Set base restraints
-                        if z_coords[0] == 0:
-                            try:
-                                # Get the joint at column base
-                                ret = self.sap_model.FrameObj.GetPoints(col_name, "", "")
-                                base_joint = ret[0]  # First point (bottom of column)
-                                
-                                # Set fixed restraint (all DOFs)
-                                restraint = [True, True, True, True, True, True]
-                                self.sap_model.PointObj.SetRestraint(base_joint, restraint)
-                            except Exception as restr_err:
-                                logger.warning(f"Could not set restraint at column base: {restr_err}")
-                        
                         columns_created += 1
                     except Exception as col_err:
                         logger.warning(f"Error creating column at ({x},{y}): {col_err}")
             
             logger.info(f"Created {columns_created} columns")
+
+            # After creating all columns, add:
+            self.apply_automatic_base_restraints()
+            # it did not work: i could not find view options to make joints visible
+            # self.make_joints_visible()
 
             # Create beams at each floor level
             logger.info("Creating beams...")
@@ -248,6 +240,79 @@ class SAPTest:
         except Exception as e:
             logger.error(f"Error creating model with custom grid spacing: {str(e)}")
             logger.error(f"Stack trace: {traceback.format_exc()}")
+            return False
+
+    def apply_automatic_base_restraints(self):
+        """
+        Automatically assign fixed supports at the base of all columns in the model.
+        This restrains all translational and rotational degrees of freedom at the base nodes.
+        """
+        try:
+            logger.info("Applying automatic base restraints...")
+            
+            # Get all frame objects (columns and beams)
+            frame_names = self.sap_model.FrameObj.GetNameList()[1]
+            
+            # Track how many restraints were applied
+            restraints_applied = 0
+            
+            # For each frame, check if it's a column by checking if its bottom point is at z=0
+            for frame_name in frame_names:
+                # Get points of the frame
+                point_names = self.sap_model.FrameObj.GetPoints(frame_name, "", "")[0:2]
+                
+                # Get coordinates of each point
+                for point_name in point_names:
+                    xyz = self.sap_model.PointObj.GetCoordCartesian(point_name)[0:3]
+                    
+                    # If point is at z=0, it's a column base - apply restraint
+                    if abs(xyz[2]) < 0.001:  # Check if z-coordinate is approximately 0
+                        # Set fixed restraint (all DOFs)
+                        #logger.info(f"Found column base at {point_name}")
+                        restraint = [True, True, True, True, True, True]
+                        self.sap_model.PointObj.SetRestraint(point_name, restraint)
+                        restraints_applied += 1
+                        break  # Only need to restrain one end of the column
+            
+            logger.info(f"Applied fixed restraints to {restraints_applied} column base points")
+            return True
+        except Exception as e:
+            logger.error(f"Error applying automatic base restraints: {e}")
+            return False
+
+    def make_joints_visible(self):
+        """
+        Make all joints visible in the model by setting the joint display options.
+        """
+        try:
+            logger.info("Making joints visible...")
+            
+            # Alternative approach using View Options method
+            # First parameter is for setting options (1) rather than getting them (0)
+            # Second parameter controls which options to set (2 for object options)
+            # Then various option flags...
+            
+            # Get current view options first
+            ret = self.sap_model.View.GetViewOptions(0, 2)
+            if ret[0] == 0:  # Success
+                # We have current view options, now set them with Invisible turned OFF
+                # Keep other settings the same
+                
+                # Show joints, show restraints, don't make them invisible
+                ret = self.sap_model.View.SetViewOptions(1, 2, True, ret[3], ret[4], ret[5], 
+                                                       ret[6], ret[7], ret[8], ret[9], True, 
+                                                       False, ret[12], ret[13])
+                
+                # Refresh view to apply changes
+                self.sap_model.View.RefreshView(0, False)
+                
+                logger.info("Joints set to visible with restraints showing")
+                return True
+            else:
+                logger.warning("Failed to get current view options")
+                return False
+        except Exception as e:
+            logger.error(f"Error making joints visible: {e}")
             return False
 
     def run_sap_script(self) -> Optional[str]:
