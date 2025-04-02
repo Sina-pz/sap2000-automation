@@ -1,0 +1,81 @@
+# SAP2000 API Documentation
+
+## 1. add_base_restraints()
+Adds restraints to ground-level column bases by finding columns with no frames below them.
+* Arguments: restraints=[True, True, True, False, False, False] (list of boolean values for Ux, Uy, Uz, Rx, Ry, Rz)
+* Returns: (list of restrained point names, status code)
+```python
+restrained_joints, restraint_status = sap_model.add_base_restraints()
+```
+
+## 2. LoadPatterns.Add()
+Adds load pattern definitions to the model.
+* Arguments: name (string), load_type (integer), self_weight_multiplier (float)
+* Returns: status code (0 for success)
+```python
+sap_model.LoadPatterns.Add("DEAD", int(SAP2000.eLoadPatternType_Dead), 1.0)
+```
+
+## 3. identify_floor_levels()
+Identifies distinct floor elevations from the model's points.
+* Arguments: tolerance=0.01 (coordinate comparison tolerance)
+* Returns: (list of floor elevations sorted from lowest to highest, status code)
+```python
+floor_levels, floor_status = sap_model.identify_floor_levels()
+```
+
+## 4. add_floor_areas()
+Adds floor areas at specified elevation by detecting enclosed polygons in the floor grid.
+* Arguments: floor_z (elevation), tolerance=0.01 (coordinate comparison tolerance)
+* Returns: (list of created area names, status code)
+```python
+areas, area_status = sap_model.add_floor_areas(floor_level)
+```
+
+## 5. AreaObj.SetLoadUniform()
+Applies uniform loads to floor areas.
+* Arguments: area_name, load_pattern, load_value, direction, replace, coordinate_system
+* Returns: status code (0 for success)
+```python
+sap_model.AreaObj.SetLoadUniform(area_name, "DEAD", 75.0, 6, True, "Global")
+```
+
+## 6. get_beams_info()
+Groups all beams in the model by their approximate length.
+* Arguments: tolerance=1.0 (tolerance for length matching)
+* Returns: dictionary mapping lengths to lists of beam frame names
+```python
+beams_by_length = sap_model.get_beams_info()
+```
+
+## 7. create_assign_section_group()
+Creates a group and assigns the specified frames to it.
+* Arguments: group_name (string), frames (list of frame names)
+* Returns: (list of frame names in the group, status code)
+```python
+sap_model.create_assign_section_group(group_name=group_name, frames=frames)
+```
+
+## 8. PropFrame.ImportProp()
+Imports frame section properties from a standard library.
+* Arguments: section_name, material, library_filename, new_property_name
+* Returns: status code (0 for success)
+```python
+ret = sap_model.PropFrame.ImportProp("W24X76", "A992Fy50", "AISC16.xml", "W24X76")
+```
+
+## 9. FrameObj.SetSection()
+Assigns sections to frame objects, often based on groups.
+* Arguments: frame_name/group_name, section_name, item_type (1 for groups)
+* Returns: status code (0 for success)
+```python
+ret = sap_model.FrameObj.SetSection(group_name, section_name, 1)
+```
+
+## 10. get_columns_info()
+Groups all columns in the model by their location (corner, edge, interior).
+* Arguments: tolerance=1.0 (tolerance for coordinate comparison)
+* Returns: dictionary mapping location types to lists of column frame names
+```python
+columns_by_location = sap_model.get_columns_info()
+```
