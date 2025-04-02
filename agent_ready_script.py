@@ -702,9 +702,11 @@ class SAPTest:
         return True
 
     def run_sap_script(self) -> bool:
-
+        # Pre-requisitite (you can assume its done):
+        # 1. A model with defined frames and joints are already loaded into sap and connected to the script and available through self.sap_model!
         # Step 1: Add base restraints to all ground level columns.
-        restrained_joints, restraint_status = sap_test.sap_model.add_base_restraints()
+        # This code identifies the ground level columns and restrains them with no translation, but free to rotate.
+        restrained_joints, restraint_status = self.sap_model.add_base_restraints()
         
         # Step 2: Create floor areas and add dead and live loads to them.
         # substep: add dead and live load patterns definitions  
@@ -745,7 +747,8 @@ class SAPTest:
         
         # **Important: separate call**: Now based on the above printed beams by length, we can create a dictionary of beam sections.
         # the below codes are based on assumptions that the beam lengths are 24ft, 22ft, 18ft, 14ft, and 10ft.
-        # The below code should be a separate function call! do not include in your current scrip
+        # The below code should be a separate function call! do not include in your current script. 
+        # based on the above printed beams by length, we can create a dictionary of beam sections.
         beam_sections = {
             "24ft Beams": "W24X76",
             "22ft Beams": "W21X44", 
@@ -765,7 +768,7 @@ class SAPTest:
                 ret = self.sap_model.PropFrame.ImportProp(
                     beam_sections[group_name],
                     "A992Fy50",
-                    "AISC16.xml",
+                    "AISC16.xml", # This is the AISC 16th edition steel code as defined in the user input
                     beam_sections[group_name]
                 )
                 ret = self.sap_model.FrameObj.SetSection(group_name, beam_sections[group_name], 1)
@@ -797,6 +800,11 @@ class SAPTest:
                 section
             )
             ret = self.sap_model.FrameObj.SetSection(group_name, section, 1)
+        
+        # Step 5: Run the analysis.
+        # Important: Allways save the model before running the analysis.
+        self.sap_model.File.Save(self.model_path)
+        self.sap_model.Analyze.RunAnalysis()
 
 if __name__ == "__main__":
     sap_test = SAPTest()
