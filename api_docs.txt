@@ -1,4 +1,7 @@
 # SAP2000 API Documentation
+Below is the description of the 10 APIs you use in your coding. 
+YOU MUST AVOID USING ANY OTHER API, Because you have outdated knowledge on SAP API and will make wrong calls. Stick with the 
+WorkFlow Code and following APIs description. 
 
 ## 1. add_base_restraints()
 Adds restraints to ground-level column bases by finding columns with no frames below them.
@@ -6,6 +9,8 @@ Adds restraints to ground-level column bases by finding columns with no frames b
 * Returns: (list of restrained point names, status code)
 ```python
 restrained_joints, restraint_status = sap_model.add_base_restraints()
+
+Important: Do NOT try to implement your own code using any other low-level API such as PointObj.SetRestraint. Only rely on this. 
 ```
 
 ## 2. LoadPatterns.Add()
@@ -78,4 +83,20 @@ Groups all columns in the model by their location (corner, edge, interior).
 * Returns: dictionary mapping location types to lists of column frame names
 ```python
 columns_by_location = sap_model.get_columns_info()
+```
+
+## 11. File.Save()
+Saves the current model to a file.
+* Arguments: file_path (string) - Path where the model should be saved
+* Returns: status code (0 for success)
+```python
+sap_model.File.Save(model_path)
+```
+
+## 12. Analyze.RunAnalysis()
+Runs the structural analysis on the current model.
+* Arguments: None
+* Returns: status code (0 for success)
+```python
+sap_model.Analyze.RunAnalysis()
 ```

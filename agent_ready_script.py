@@ -13,10 +13,12 @@ import traceback
 from typing import Dict, List, Optional, Tuple, Union
 
 import comtypes.client
+<<<<<<< HEAD
 
+=======
+>>>>>>> 3ed57ea (add documentation and making subtle changes)
 helper = comtypes.client.CreateObject('SAP2000v1.Helper')
 import comtypes.gen.SAP2000v1 as SAP2000
-
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -769,15 +771,15 @@ class SAPTest:
         # 1. A model with defined frames and joints are already loaded into sap and connected to the script and available through self.sap_model!
         # Step 1: Add base restraints to all ground level columns.
         # This code identifies the ground level columns and restrains them with no translation, but free to rotate.
-        restrained_joints, restraint_status = self.sap_model.add_base_restraints()
-        
+        restraints = [True, True, True, False, False, False]
+        restrained_joints, restraint_status = self.sap_model.add_base_restraints(restraints)
         # Step 2: Create floor areas and add dead and live loads to them.
         # substep: add dead and live load patterns definitions  
-        self.sap_model.LoadPatterns.Add("DEAD", int(SAP2000.eLoadPatternType_Dead), 1.0)
-        self.sap_model.LoadPatterns.Add("LIVE", int(SAP2000.eLoadPatternType_Live), 0.0)
+        self.sap_model.LoadPatterns.Add("DEAD", 1, 1.0)  # 1 is eLoadPatternType_Dead
+        self.sap_model.LoadPatterns.Add("LIVE", 3, 0.0)  # 3 is eLoadPatternType_Live
 
         # substep: identify all the floor levels.
-        floor_levels, floor_status = sap_test.sap_model.identify_floor_levels()
+        floor_levels, floor_status = self.sap_model.identify_floor_levels()
         for i, floor_level in enumerate(floor_levels):
             # Check if this is the roof level since it needs a different load value
             is_roof = (i == len(floor_levels) - 1)
