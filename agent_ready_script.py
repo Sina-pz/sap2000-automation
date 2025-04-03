@@ -13,10 +13,6 @@ import traceback
 from typing import Dict, List, Optional, Tuple, Union
 
 import comtypes.client
-<<<<<<< HEAD
-
-=======
->>>>>>> 3ed57ea (add documentation and making subtle changes)
 helper = comtypes.client.CreateObject('SAP2000v1.Helper')
 import comtypes.gen.SAP2000v1 as SAP2000
 # Set up logging
