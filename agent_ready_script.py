@@ -1,9 +1,20 @@
+# import logging
+# import os
+# import traceback
+# from typing import Optional, Tuple, List, Dict, Union
+
+# import comtypes.client
+# import comtypes.gen.SAP2000v1 as SAP2000
+
 import logging
+import math
 import os
 import traceback
-from typing import Optional, Tuple, List, Dict, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import comtypes.client
+
+helper = comtypes.client.CreateObject('SAP2000v1.Helper')
 import comtypes.gen.SAP2000v1 as SAP2000
 
 # Set up logging
@@ -171,6 +182,44 @@ class CustomSAP2000Model:
             # Create area objects in SAP2000 (without loads)
             created_areas = self._create_areas_without_loads(faces, vertex_map, floor_z)
             
+            # For each created area, adjust its local axis orientation to align with the shortest edge
+            for area_name in created_areas:
+                # Get the area's corner points
+                ret = self._model.AreaObj.GetPoints(area_name)
+                if ret[0] > 0:  # If points were successfully retrieved
+                    point_names = ret[1]  # List of point names defining the area
+                    
+                    # Get coordinates of all area points
+                    point_coords = []
+                    
+                    for point in point_names:
+                        x, y, z, ret = self._model.PointObj.GetCoordCartesian(point)
+                        if ret == 0:
+                            point_coords.append((x, y))
+                    
+                    # Step 1: Determine shortest edge in the face
+                    min_length = float('inf')
+                    best_angle = 0.0
+                    
+                    for j in range(len(point_coords)):
+                        x1, y1 = point_coords[j]
+                        x2, y2 = point_coords[(j + 1) % len(point_coords)]
+                        
+                        dx = x2 - x1
+                        dy = y2 - y1
+                        length = math.sqrt(dx**2 + dy**2)
+                        
+                        if length < min_length:
+                            min_length = length
+                            best_angle = math.degrees(math.atan2(dy, dx))
+                    
+                    # Step 2: Set local axis to align with that shortest edge
+                    # Normalize the angle between 0 and 360
+                    best_angle = best_angle % 360
+                    ret = self._model.AreaObj.SetLocalAxes(area_name, best_angle)
+                    if ret != 0:
+                        logger.warning(f"Failed to set local axes for area {area_name}")
+            
             logger.info(f"Created {len(created_areas)} floor areas at elevation z={floor_z}")
             return (created_areas, 0)
             
@@ -280,7 +329,6 @@ class CustomSAP2000Model:
         Returns:
             Dictionary mapping vertex indices to sorted neighbor lists
         """
-        import math
         sorted_neighbors = {}
         
         # Invert vertex map for lookup
@@ -412,7 +460,7 @@ class CustomSAP2000Model:
         
     def _create_areas_without_loads(self, faces, vertex_map, floor_z):
         """
-        Create area objects in SAP2000 for each detected face without adding loads.
+        Create area objects in SAP2000 (without loads).
         
         Args:
             faces: List of faces, where each face is a list of vertex indices
@@ -424,7 +472,7 @@ class CustomSAP2000Model:
         """
         created_areas = []
         
-        # Invert vertex map for coordinate lookup
+        # Invert vertex map for lookup
         vertex_coords = {v: coords for coords, v in vertex_map.items()}
         
         for i, face in enumerate(faces):
@@ -455,6 +503,21 @@ class CustomSAP2000Model:
             # Get the generated area name
             area_name = ret[3] if len(ret) > 3 else f"Area_{i+1}"
             created_areas.append(area_name)
+            
+            # Determine the shorter span direction and set local axis accordingly
+            # Calculate the dimensions of the area in X and Y directions
+            min_x, max_x = min(x_array), max(x_array)
+            min_y, max_y = min(y_array), max(y_array)
+            x_span = max_x - min_x
+            y_span = max_y - min_y
+            
+            # If the X span is shorter, rotate the local axis
+            if x_span < y_span:
+                # Set local axis angle to 90 degrees (align with shorter span)
+                self._model.AreaObj.SetLocalAxes(area_name, 90)
+            else:
+                # Set local axis angle to 0 degrees (default, align with shorter span)
+                self._model.AreaObj.SetLocalAxes(area_name, 0)
             
         return created_areas
 
@@ -745,66 +808,123 @@ class SAPTest:
         beams_by_length = self.sap_model.get_beams_info()
         print(f"beams by length: {beams_by_length}")
         
-        # **Important: separate call**: Now based on the above printed beams by length, we can create a dictionary of beam sections.
-        # the below codes are based on assumptions that the beam lengths are 24ft, 22ft, 18ft, 14ft, and 10ft.
-        # The below code should be a separate function call! do not include in your current script. 
-        # based on the above printed beams by length, we can create a dictionary of beam sections.
-        beam_sections = {
-            "24ft Beams": "W24X76",
-            "22ft Beams": "W21X44", 
-            "18ft Beams": "W18X40",
-            "14ft Beams": "W14X34",
-            "10ft Beams": "W10X33"
+        # Define auto-select lists for beams based on length
+        beam_auto_select_lists = {
+            "24ft Beams": ["W24X76", "W24X84", "W24X94", "W24X103", "W24X117"],
+            "22ft Beams": ["W21X44", "W21X50", "W21X57", "W21X68", "W21X83"], 
+            "18ft Beams": ["W18X40", "W18X46", "W18X50", "W18X55", "W18X60"],
+            "14ft Beams": ["W14X34", "W14X38", "W14X43", "W14X48", "W14X53"],
+            "10ft Beams": ["W10X33", "W10X39", "W10X45", "W10X49", "W10X54"]
         }
     
-        # Now we can assign the sections to the beams.
+        # Step 1: Import all section properties first
+        for group_name, section_list in beam_auto_select_lists.items():
+            for section in section_list:
+                ret = self.sap_model.PropFrame.ImportProp(
+                    section,
+                    "A992Fy50",
+                    "AISC16.xml",
+                    section
+                )
+                if ret != 0:
+                    logger.warning(f"Failed to import section {section}")
+
+        # Step 2 & 3: Create auto-select lists and assign to beam groups
         for length, frames in beams_by_length.items():
             group_name = f"{int(length)}ft Beams"
-            if group_name in beam_sections:
+            if group_name in beam_auto_select_lists:
+                # Create group and assign frames
                 self.sap_model.create_assign_section_group(
                     group_name=group_name,
                     frames=frames
                 )
-                ret = self.sap_model.PropFrame.ImportProp(
-                    beam_sections[group_name],
-                    "A992Fy50",
-                    "AISC16.xml", # This is the AISC 16th edition steel code as defined in the user input
-                    beam_sections[group_name]
+                
+                # Create the auto-select list
+                section_list = beam_auto_select_lists[group_name]
+                auto_list_name = f"AUTO_{group_name}"
+                ret = self.sap_model.PropFrame.SetAutoSelectSteel(
+                    auto_list_name,
+                    len(section_list),
+                    section_list,
+                    section_list[0]  # Start with smallest section
                 )
-                ret = self.sap_model.FrameObj.SetSection(group_name, beam_sections[group_name], 1)
+                
+                # Assign the auto-select list to the group
+                ret = self.sap_model.FrameObj.SetSection(group_name, auto_list_name, 1)  # 1 = apply to group
+                logger.info(f"Assigned auto-select list {auto_list_name} to {group_name}")
 
         # Step4: Create Column section groups and assign sections to them.
         # substep: get column information by location since we group columns based on the location
         columns_by_location = self.sap_model.get_columns_info()
         print(f"columns by location: {columns_by_location}")
 
-        # **Important: separate call**: Now based on the above printed columns by location, we can create a dictionary of column sections.
-        # the below codes are based on assumptions that the column locations are corner, edge, and interior.
-        column_sections = {
-            "corner": "W10X12",
-            "edge": "W12X190",
-            "interior": "W14X193"
+        # Define auto-select lists for columns based on location
+        column_auto_select_lists = {
+            "corner": ["W10X12", "W10X15", "W10X19", "W10X22", "W10X26"],
+            "edge": ["W12X190", "W12X210", "W12X230", "W12X252", "W12X279"],
+            "interior": ["W14X193", "W14X211", "W14X233", "W14X257", "W14X283"]
         }
-        # Assign column sections
-        for location, section in column_sections.items():
+        
+        # Step 1: Import all column section properties
+        for location, section_list in column_auto_select_lists.items():
+            for section in section_list:
+                ret = self.sap_model.PropFrame.ImportProp(
+                    section,
+                    "A992Fy50",
+                    "AISC16.xml",
+                    section
+                )
+                if ret != 0:
+                    logger.warning(f"Failed to import section {section}")
+                    
+        # Step 2 & 3: Create auto-select lists and assign to column groups
+        for location, frames in columns_by_location.items():
             group_name = f"{location.capitalize()} Columns"
             # Create group and assign frames
             self.sap_model.create_assign_section_group(
                 group_name=group_name,
-                frames=columns_by_location[location]
+                frames=frames
             )
-            ret = self.sap_model.PropFrame.ImportProp(
-                section,
-                "A992Fy50",
-                "AISC16.xml",
-                section
+            
+            # Create the auto-select list
+            section_list = column_auto_select_lists[location]
+            auto_list_name = f"AUTO_{group_name}"
+            ret = self.sap_model.PropFrame.SetAutoSelectSteel(
+                auto_list_name,
+                len(section_list),
+                section_list,
+                section_list[0]  # Start with smallest section
             )
-            ret = self.sap_model.FrameObj.SetSection(group_name, section, 1)
+            
+            # Assign the auto-select list to the group
+            ret = self.sap_model.FrameObj.SetSection(group_name, auto_list_name, 1)  # 1 = apply to group
+            logger.info(f"Assigned auto-select list {auto_list_name} to {group_name}")
         
         # Step 5: Run the analysis.
-        # Important: Allways save the model before running the analysis.
+        # Important: Always save the model before running the analysis.
         self.sap_model.File.Save(self.model_path)
         self.sap_model.Analyze.RunAnalysis()
+        
+        # Step 6: Run Steel Design to select optimal sections from auto-select lists
+        # Set the design code explicitly before running design
+        self.sap_model.DesignSteel.SetCode("AISC 360-16")
+        ret = self.sap_model.DesignSteel.StartDesign() #"AISC 360-16"
+        
+        # Optional Step 7: Check final selected sections for a sample of frames
+        for length, frames in beams_by_length.items():
+            if frames:
+                group_name = f"{int(length)}ft Beams"
+                sample_frame = frames[0]
+                section_name, auto_list, ret = self.sap_model.FrameObj.GetSection(sample_frame)
+                logger.info(f"Sample {group_name}: {sample_frame} - Selected section: {section_name} (from Auto List: {auto_list})")
+                
+        for location, frames in columns_by_location.items():
+            if frames:
+                sample_frame = frames[0]
+                section_name, auto_list, ret = self.sap_model.FrameObj.GetSection(sample_frame)
+                logger.info(f"Sample {location} column: {sample_frame} - Selected section: {section_name} (from Auto List: {auto_list})")
+                
+        return True
 
 if __name__ == "__main__":
     sap_test = SAPTest()
