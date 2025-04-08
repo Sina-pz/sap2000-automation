@@ -15,6 +15,9 @@ from typing import Dict, List, Optional, Tuple, Union
 import comtypes.client
 helper = comtypes.client.CreateObject('SAP2000v1.Helper')
 import comtypes.gen.SAP2000v1 as SAP2000
+import xml.etree.ElementTree as ET
+from collections import defaultdict
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,6 +28,127 @@ class CustomSAP2000Model:
     """
     def __init__(self, sap_model):
         self._model = sap_model
+        self.section_names = self._load_section_names()
+
+    def _load_section_names(self):
+        """
+        Loads and parses the AISC16.xml file to get all section names
+        """
+        xml_path = os.path.join(os.path.dirname(__file__), 'AISC16.xml')
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        
+        # Handle XML namespace
+        # Extract namespace from root tag
+        ns = {'ns': root.tag.split('}')[0].strip('{')} if '}' in root.tag else ''
+        
+        # Dictionary to store section names by type
+        section_names = {
+            'W': [],  # Wide flange sections (from STEEL_I_SECTION)
+            'L': [],  # Angle sections
+            'C': [],  # Channel sections
+            'WT': [], # Tee sections
+            'HSS': [] # Hollow structural sections
+        }
+        
+        # Parse each section type
+        section_mappings = {
+            'STEEL_I_SECTION': ['W'],  # W sections from I sections
+            'STEEL_ANGLE': ['L'],  # Angle sections
+            'STEEL_CHANNEL': ['C'],  # Channel sections
+            'STEEL_TEE': ['WT'],  # Tee sections
+            'STEEL_BOX': ['HSS'],  # Box sections
+            'STEEL_PIPE': ['HSS']  # Pipe sections (also HSS)
+        }
+        
+        for xml_type, designations in section_mappings.items():
+            # Find all sections of this type, handling potential namespace
+            xpath = f".//{xml_type}" if not ns else f".//ns:{xml_type}"
+            for section in root.findall(xpath, namespaces=ns):
+                # Find elements, handling potential namespace
+                label_elem = section.find('LABEL' if not ns else 'ns:LABEL', namespaces=ns)
+                designation_elem = section.find('DESIGNATION' if not ns else 'ns:DESIGNATION', namespaces=ns)
+                
+                if label_elem is not None and designation_elem is not None:
+                    label = label_elem.text
+                    designation = designation_elem.text
+                    # Store in appropriate category if designation matches
+                    if designation in designations:
+                        section_names[designation].append(label)
+        
+        # Log the number of sections found for each type
+        for section_type, sections in section_names.items():
+            logger.info(f"Found {len(sections)} {section_type} sections")
+            if sections:  # Log a sample of sections found
+                logger.info(f"Sample {section_type} sections: {', '.join(sections[:5])}")
+            
+        return section_names
+
+    def define_section_candidate(self, frames, section_type='w', member_type='beam'):
+        """
+        Automatically defines section candidates based on frame lengths and member type.
+        
+        Args:
+            frames (list): List of frame names to analyze
+            section_type (str): Type of section ('w' for wide flange)
+            member_type (str): Type of member ('beam' or 'column')
+        
+        Returns:
+            list: List of section names
+        """
+        if member_type.lower() == 'column':
+            # For columns, return all W sections sorted by depth
+            w_sections = self.section_names['W']
+            return sorted(w_sections, 
+                        key=lambda x: float(x.split('X')[0][1:]),  # Sort by depth
+                        reverse=True)  # Largest to smallest
+        
+        # For beams, calculate average length and find appropriate sections
+        total_length = 0
+        for frame in frames:
+            # Get frame endpoints
+            point_i, point_j, ret = self._model.FrameObj.GetPoints(frame)
+            if ret != 0:
+                continue
+                
+            # Get coordinates
+            x_i, y_i, z_i, ret_i = self._model.PointObj.GetCoordCartesian(point_i)
+            x_j, y_j, z_j, ret_j = self._model.PointObj.GetCoordCartesian(point_j)
+            
+            if ret_i != 0 or ret_j != 0:
+                continue
+            
+            # Calculate length
+            dx = x_j - x_i
+            dy = y_j - y_i
+            frame_length = (dx**2 + dy**2)**0.5
+            total_length += frame_length
+        
+        if not frames:
+            return []
+            
+        avg_length_ft = total_length / len(frames)  # Length is already in feet
+        
+        # Get all W sections
+        w_sections = self.section_names['W']
+        
+        # Group sections by depth
+        sections_by_depth = defaultdict(list)
+        for section_name in w_sections:
+            depth = int(section_name.split('X')[0][1:])  # Extract depth from name (e.g., W24X76 -> 24)
+            sections_by_depth[depth].append(section_name)
+        
+        # Find the closest depth based on span length
+        # Rule of thumb: depth (in inches) ≈ span (in feet)
+        target_depth = round(avg_length_ft)
+        
+        # Find the closest available depth
+        available_depths = sorted(sections_by_depth.keys())
+        closest_depth = min(available_depths, key=lambda x: abs(x - target_depth))
+        
+        # Return sections of the closest depth, sorted by weight
+        return sorted(sections_by_depth[closest_depth],
+                    key=lambda x: float(x.split('X')[1]))  # Sort by weight
 
     def __getattr__(self, name):
         """
@@ -934,13 +1058,13 @@ class SAPTest:
         print(f"beams by length: {beams_by_length}")
         
         # Define auto-select lists for beams based on length
-        beam_auto_select_lists = {
-            "24ft Beams": ["W24X76", "W24X84", "W24X94", "W24X103", "W24X117"],
-            "22ft Beams": ["W21X44", "W21X50", "W21X57", "W21X68", "W21X83"], 
-            "18ft Beams": ["W18X40", "W18X46", "W18X50", "W18X55", "W18X60"],
-            "14ft Beams": ["W14X34", "W14X38", "W14X43", "W14X48", "W14X53"],
-            "10ft Beams": ["W10X33", "W10X39", "W10X45", "W10X49", "W10X54"]
-        }
+        beam_auto_select_lists = {}
+        
+        # Get section candidates for each beam length group
+        for length, frames in beams_by_length.items():
+            group_name = f"{int(length)}ft Beams"
+            sections = self.sap_model.define_section_candidate(frames, section_type='w', member_type='beam')
+            beam_auto_select_lists[group_name] = sections[:5]  # Take top 5 sections for each group
     
         # Step 1: Import all section properties first
         for group_name, section_list in beam_auto_select_lists.items():
@@ -984,14 +1108,16 @@ class SAPTest:
         print(f"columns by location: {columns_by_location}")
 
         # Define auto-select lists for columns based on location
-        column_auto_select_lists = {
-            "corner": ["W10X12", "W10X15", "W10X19", "W10X22", "W10X26"],
-            "edge": ["W12X190", "W12X210", "W12X230", "W12X252", "W12X279"],
-            "interior": ["W14X193", "W14X211", "W14X233", "W14X257", "W14X283"]
-        }
+        column_auto_select_lists = {}
+        
+        # Get section candidates for each column location group
+        for location, frames in columns_by_location.items():
+            group_name = f"{location.capitalize()} Columns"
+            sections = self.sap_model.define_section_candidate(frames, section_type='w', member_type='column')
+            column_auto_select_lists[group_name] = sections[:5]  # Take top 5 sections for each group
         
         # Step 1: Import all column section properties
-        for location, section_list in column_auto_select_lists.items():
+        for group_name, section_list in column_auto_select_lists.items():
             for section in section_list:
                 ret = self.sap_model.PropFrame.ImportProp(
                     section,
@@ -1012,7 +1138,7 @@ class SAPTest:
             )
             
             # Create the auto-select list
-            section_list = column_auto_select_lists[location]
+            section_list = column_auto_select_lists[group_name]
             auto_list_name = f"AUTO_{group_name}"
             ret = self.sap_model.PropFrame.SetAutoSelectSteel(
                 auto_list_name,
