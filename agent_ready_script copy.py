@@ -7,7 +7,6 @@
 # import comtypes.gen.SAP2000v1 as SAP2000
 
 import logging
-import math
 import os
 import traceback
 from typing import Dict, List, Optional, Tuple, Union
@@ -160,7 +159,7 @@ class CustomSAP2000Model:
         """
         try:
             # Get all beams at this floor level
-            horizontal_beams = self._get_coplanar_beams_at_elevation(floor_z, tolerance)
+            horizontal_beams = self._get_horizontal_beams_at_elevation(floor_z, tolerance)
             
             if not horizontal_beams:
                 logger.warning(f"No horizontal beams found at elevation z={floor_z}")
@@ -170,7 +169,7 @@ class CustomSAP2000Model:
             vertex_map, adjacency_list = self._build_graph(horizontal_beams, tolerance)
             
             # Sort edges by angle around each vertex
-            sorted_neighbors = self._sort_edges_by_angle(adjacency_list)
+            sorted_neighbors = self._compute_angles_around_vertices(vertex_map, adjacency_list)
             
             # Find all closed polygons (faces)
             faces = self._find_all_faces(vertex_map, sorted_neighbors)
@@ -190,18 +189,18 @@ class CustomSAP2000Model:
             logger.error(f"Stack trace: {traceback.format_exc()}")
             return ([], 1)
             
-    def _get_coplanar_beams_at_elevation(self, elevation, tolerance):
+    def _get_horizontal_beams_at_elevation(self, elevation, tolerance):
         """
-        Get all coplanar beams at the specified elevation, including non-orthogonal beams.
+        Get all horizontal beams at the specified elevation.
         
         Args:
             elevation: The Z coordinate to look for beams at
             tolerance: Coordinate comparison tolerance
             
         Returns:
-            List of dictionaries containing beam information including angles
+            List of dictionaries containing beam information
         """
-        coplanar_beams = []
+        horizontal_beams = []
         
         # Get all frames
         num_frames, frame_names, ret = self._model.FrameObj.GetNameList()
@@ -209,6 +208,7 @@ class CustomSAP2000Model:
             logger.error("Failed to get frame names")
             return []
         
+        # Find horizontal beams at this elevation
         for frame_name in frame_names:
             point_i, point_j, ret = self._model.FrameObj.GetPoints(frame_name)
             if ret != 0:
@@ -224,159 +224,113 @@ class CustomSAP2000Model:
             # Check if both points are at the target elevation
             if (abs(z_i - elevation) < tolerance and 
                 abs(z_j - elevation) < tolerance):
-                
-                # Calculate beam angle
-                dx = x_j - x_i
-                dy = y_j - y_i
-                angle = math.degrees(math.atan2(dy, dx)) % 360
-                
-                # Log warning for very small angles
-                if abs(angle) < 5 or abs(angle - 180) < 5:
-                    logger.warning(f"Very small angle detected in beam {frame_name}: {angle:.2f}°")
-                
-                coplanar_beams.append({
+                horizontal_beams.append({
                     'name': frame_name,
                     'point_i': point_i,
                     'point_j': point_j,
                     'coords_i': (x_i, y_i, z_i),
-                    'coords_j': (x_j, y_j, z_j),
-                    'angle': angle
+                    'coords_j': (x_j, y_j, z_j)
                 })
         
-        return coplanar_beams
+        return horizontal_beams
         
     def _build_graph(self, beam_list, tolerance):
         """
-        Build graph representation of the floor structure with support for trapezoidal geometry.
-        Uses coordinate normalization to group vertices and stores angles for proper face tracing.
+        Build graph representation of the floor structure.
         
         Args:
-            beam_list: List of beam dictionaries with coordinates and angles
-            tolerance: Coordinate comparison tolerance for vertex grouping
+            beam_list: List of beam dictionaries with coordinates
+            tolerance: Coordinate comparison tolerance
             
         Returns:
-            vertex_map: Dictionary mapping normalized coordinates to vertex indices
-            adjacency_list: Dictionary mapping vertex indices to sorted neighbor lists with angles
+            vertex_map: Dictionary mapping coordinates to vertex indices
+            adjacency_list: Dictionary mapping vertex indices to neighbors
         """
-        vertex_map = {}     # Maps normalized (x, y, z) -> vertex_index
-        adjacency_list = {} # Maps vertex_index -> list of (neighbor_index, beam_id, angle)
+        vertex_map = {}     # Maps (x, y, z) -> vertex_index
+        adjacency_list = {} # Maps vertex_index -> list of (neighbor_index, beam_id)
         vertex_count = 0
         
-        def normalize_coords(coords):
-            """Normalize coordinates to grid spacing using tolerance."""
-            return tuple(round(v / tolerance) * tolerance for v in coords)
-        
-        def find_nearest_vertex(normalized_coords):
-            """Find existing vertex or create new one for normalized coordinates."""
-            if normalized_coords in vertex_map:
-                return vertex_map[normalized_coords]
-            nonlocal vertex_count
-            vertex_map[normalized_coords] = vertex_count
-            adjacency_list[vertex_count] = []
-            vertex_count += 1
-            return vertex_map[normalized_coords]
-        
-        # Process each beam
         for beam in beam_list:
             beam_id = beam['name']
             coords_i = beam['coords_i']
             coords_j = beam['coords_j']
-            angle = beam['angle']
             
-            # Normalize coordinates to group vertices
-            norm_coords_i = normalize_coords(coords_i)
-            norm_coords_j = normalize_coords(coords_j)
+            # Convert coordinates to consistent format for comparison
+            coords_i_key = tuple(round(v / tolerance) * tolerance for v in coords_i)
+            coords_j_key = tuple(round(v / tolerance) * tolerance for v in coords_j)
             
             # Get or create vertex indices
-            v1 = find_nearest_vertex(norm_coords_i)
-            v2 = find_nearest_vertex(norm_coords_j)
+            if coords_i_key not in vertex_map:
+                vertex_map[coords_i_key] = vertex_count
+                adjacency_list[vertex_count] = []
+                vertex_count += 1
+                
+            if coords_j_key not in vertex_map:
+                vertex_map[coords_j_key] = vertex_count
+                adjacency_list[vertex_count] = []
+                vertex_count += 1
+                
+            v1 = vertex_map[coords_i_key]
+            v2 = vertex_map[coords_j_key]
             
-            # Add bidirectional edges with angle information
-            adjacency_list[v1].append((v2, beam_id, angle))
-            adjacency_list[v2].append((v1, beam_id, (angle + 180) % 360))
-        
-        # Sort neighbors by angle for each vertex
-        for vertex in adjacency_list:
-            adjacency_list[vertex].sort(key=lambda x: x[2])
+            # Add bidirectional edges
+            adjacency_list[v1].append((v2, beam_id))
+            adjacency_list[v2].append((v1, beam_id))
         
         return vertex_map, adjacency_list
         
-    def _sort_edges_by_angle(self, adjacency_list):
+    def _compute_angles_around_vertices(self, vertex_map, adjacency_list):
         """
-        Sort edges by their pre-computed angles around each vertex for proper counter-clockwise traversal.
-        This function assumes angles have already been computed and stored in the adjacency list.
-
+        Compute and sort edges by angle around each vertex.
+        
         Args:
-            adjacency_list: Dictionary mapping vertex indices to neighbors with angles
-                          Format: {vertex_index: [(neighbor_index, beam_id, angle), ...]}
-
+            vertex_map: Dictionary mapping coordinates to vertex indices
+            adjacency_list: Dictionary mapping vertex indices to neighbors
+            
         Returns:
             Dictionary mapping vertex indices to sorted neighbor lists
-            Format: {vertex_index: [(neighbor_index, beam_id, angle), ...]}
         """
+        import math
         sorted_neighbors = {}
         
+        # Invert vertex map for lookup
+        vertex_coords = {v: coords for coords, v in vertex_map.items()}
+        
         for vertex_index, neighbors in adjacency_list.items():
-            # Sort neighbors by angle
-            sorted_neighbors[vertex_index] = sorted(neighbors, key=lambda x: x[2])
+            v_coord = vertex_coords[vertex_index]
+            angle_list = []
+            
+            for neighbor_index, beam_id in neighbors:
+                n_coord = vertex_coords[neighbor_index]
+                
+                # Compute 2D angle (ignore Z)
+                dx = n_coord[0] - v_coord[0]
+                dy = n_coord[1] - v_coord[1]
+                angle = math.atan2(dy, dx)
+                
+                angle_list.append((neighbor_index, beam_id, angle))
+            
+            # Sort by angle
+            angle_list.sort(key=lambda x: x[2])
+            sorted_neighbors[vertex_index] = angle_list
         
         return sorted_neighbors
         
     def _find_all_faces(self, vertex_map, sorted_neighbors):
         """
         Find all closed polygons using face traversal algorithm.
-        Validates faces based on area, coplanarity, and minimum size requirements.
+        Filters out duplicate faces and large perimeter faces.
         
         Args:
             vertex_map: Dictionary mapping coordinates to vertex indices
             sorted_neighbors: Dictionary mapping vertex indices to sorted neighbor lists
             
         Returns:
-            List of valid faces, where each face is a list of vertex indices
+            List of faces, where each face is a list of vertex indices
         """
         visited_half_edges = set()  # Set of (v_current, v_next) pairs
         all_faces = []
         
-        # Create reverse mapping at the start
-        vertex_coords = {v: coords for coords, v in vertex_map.items()}
-        
-        def calculate_face_area(face_vertices):
-            area = 0.0
-            n = len(face_vertices)
-            for i in range(n):
-                j = (i + 1) % n
-                coords_i = vertex_coords[face_vertices[i]]  # Use vertex_coords instead of vertex_map
-                coords_j = vertex_coords[face_vertices[j]]
-                area += coords_i[0] * coords_j[1] - coords_j[0] * coords_i[1]
-            return abs(area) / 2.0
-
-        def check_coplanarity(face_vertices):
-            if len(face_vertices) < 3:
-                return True
-                
-            # Use vertex_coords for all coordinate access
-            p1 = vertex_coords[face_vertices[0]]
-            p2 = vertex_coords[face_vertices[1]]
-            p3 = vertex_coords[face_vertices[2]]
-            
-            # Calculate normal vector of the plane
-            v1 = (p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2])
-            v2 = (p3[0] - p1[0], p3[1] - p1[1], p3[2] - p1[2])
-            normal = (
-                v1[1] * v2[2] - v1[2] * v2[1],
-                v1[2] * v2[0] - v1[0] * v2[2],
-                v1[0] * v2[1] - v1[1] * v2[0]
-            )
-            
-            # Check if all other points lie on the plane
-            for vertex in face_vertices[3:]:
-                p = vertex_coords[vertex]
-                v = (p[0] - p1[0], p[1] - p1[1], p[2] - p1[2])
-                dot_product = sum(n * v for n, v in zip(normal, v))
-                if abs(dot_product) > 1e-6:  # Small tolerance for floating point comparison
-                    return False
-            return True
-
         # For each vertex
         for v in sorted_neighbors.keys():
             # Try starting a face from each edge
@@ -388,11 +342,7 @@ class CustomSAP2000Model:
                     face_vertices = self._trace_face(v, v_next, sorted_neighbors, visited_half_edges)
                     
                     if face_vertices and len(face_vertices) >= 3:  # Valid polygon needs at least 3 vertices
-                        # Check if face is valid
-                        if check_coplanarity(face_vertices):
-                            area = calculate_face_area(face_vertices)
-                            if area > 1.0:  # Minimum area threshold (1 square unit)
-                                all_faces.append(face_vertices)
+                        all_faces.append(face_vertices)
         
         # Filter out duplicate faces (same vertices in different order)
         unique_faces = []
@@ -405,15 +355,18 @@ class CustomSAP2000Model:
             # Only add if we haven't seen this exact set of vertices
             if face_set not in unique_face_sets:
                 unique_face_sets.add(face_set)
-                unique_faces.append(face)
+                
+                # For grid structures, we're primarily interested in quadrilaterals
+                # This also filters out large perimeter faces
+                if len(face) == 4:
+                    unique_faces.append(face)
         
-        logger.info(f"Found {len(all_faces)} total faces, filtered to {len(unique_faces)} unique valid faces")
+        logger.info(f"Found {len(all_faces)} total faces, filtered to {len(unique_faces)} unique quadrilateral faces")
         return unique_faces
         
     def _trace_face(self, start_v, next_v, sorted_neighbors, visited_half_edges):
         """
-        Trace a single face by following half-edges with enhanced handling for non-orthogonal connections.
-        Validates the face geometry and ensures proper closure.
+        Trace a single face by following half-edges.
         
         Args:
             start_v: Starting vertex index
@@ -422,7 +375,7 @@ class CustomSAP2000Model:
             visited_half_edges: Set of visited half-edges
             
         Returns:
-            List of vertex indices forming a face, or empty list if no valid face found
+            List of vertex indices forming a face, or empty list if no face found
         """
         face_vertices = [start_v]
         current_v = start_v
@@ -453,7 +406,6 @@ class CustomSAP2000Model:
                     
             if back_index == -1:
                 # Error: can't find the return edge
-                logger.warning(f"Failed to find return edge at vertex {current_v}")
                 return []
                 
             # Next edge in counter-clockwise order
@@ -470,8 +422,7 @@ class CustomSAP2000Model:
         
     def _create_areas_without_loads(self, faces, vertex_map, floor_z):
         """
-        Create area objects in SAP2000 with optimized local axis assignment for trapezoidal shapes.
-        Validates area creation and provides detailed logging.
+        Create area objects in SAP2000 for each detected face without adding loads.
         
         Args:
             faces: List of faces, where each face is a list of vertex indices
@@ -483,41 +434,11 @@ class CustomSAP2000Model:
         """
         created_areas = []
         
-        def get_optimal_axis_angle(face_vertices):
-            """
-            Calculate optimal local axis angle based on edge geometry.
-            For floor systems, aligns with the shorter span direction to match one-way slab behavior.
-            
-            Args:
-                face_vertices: List of vertex indices forming the face
-                
-            Returns:
-                Optimal angle in degrees for local axis orientation
-            """
-            min_length = float('inf')
-            optimal_angle = 0
-            
-            # Calculate length and angle for each edge
-            for i in range(len(face_vertices)):
-                j = (i + 1) % len(face_vertices)
-                v1 = vertex_map[face_vertices[i]]
-                v2 = vertex_map[face_vertices[j]]
-                
-                dx = v2[0] - v1[0]
-                dy = v2[1] - v1[1]
-                length = math.sqrt(dx**2 + dy**2)
-                
-                if length < min_length:
-                    min_length = length
-                    optimal_angle = math.degrees(math.atan2(dy, dx))
-            
-            return optimal_angle % 360  # Normalize to 0-360 range
-
-        # Invert vertex map for lookup
+        # Invert vertex map for coordinate lookup
         vertex_coords = {v: coords for coords, v in vertex_map.items()}
         
         for i, face in enumerate(faces):
-            # Extract coordinates for each vertex
+            # Extract coordinates for each vertex (retaining only X and Y, using floor_z for Z)
             x_array = []
             y_array = []
             z_array = []
@@ -528,36 +449,23 @@ class CustomSAP2000Model:
                 y_array.append(coords[1])
                 z_array.append(floor_z)  # Use consistent floor Z value
             
-            # Skip areas with fewer than 3 vertices
+            # Skip areas that are too small (likely noise or error)
             if len(x_array) < 3:
-                logger.warning(f"Skipping face {i}: insufficient vertices ({len(x_array)})")
                 continue
                 
-            # Create the area with a unique name
-            area_name = f"FloorArea_{i+1}"
+            # Create the area
             ret = self._model.AreaObj.AddByCoord(
-                len(x_array),
-                x_array,
-                y_array,
-                z_array,
-                area_name
+                len(x_array),  # Number of points
+                x_array,       # X coordinates 
+                y_array,       # Y coordinates
+                z_array,       # Z coordinates (all equal to floor_z)
+                ""             # Auto-name
             )
             
-            if ret != 0:
-                logger.error(f"Failed to create area for face {i} (status: {ret})")
-                continue
-                
-            # Calculate and set optimal local axis angle
-            optimal_angle = get_optimal_axis_angle(face)
-            ret = self._model.AreaObj.SetLocalAxes(area_name, optimal_angle)
+            # Get the generated area name
+            area_name = ret[3] if len(ret) > 3 else f"Area_{i+1}"
+            created_areas.append(area_name)
             
-            if ret != 0:
-                logger.warning(f"Failed to set local axes for area {area_name}")
-            else:
-                logger.info(f"Created area {area_name} with local axis angle {optimal_angle:.1f}° (aligned with shortest span)")
-                created_areas.append(area_name)
-        
-        logger.info(f"Successfully created {len(created_areas)} areas out of {len(faces)} faces")
         return created_areas
 
     def get_beams_info(self, tolerance: float = 1.0) -> Dict[float, List[str]]:
@@ -766,133 +674,6 @@ class CustomSAP2000Model:
             logger.error(f"Stack trace: {traceback.format_exc()}")
             return ([], 1)
 
-    def analyze_group_utilization(self, group_name: str, frame_type: str = "Beam") -> None:
-        """
-        Analyzes the utilization ratios for frames in a group and logs useful statistics.
-        Identifies underutilized frames that could potentially be regrouped.
-        
-        Args:
-            group_name: Name of the frame group to analyze
-            frame_type: Type of frame ("Beam" or "Column") for logging purposes
-            
-        Returns:
-            List of underutilized frames with their utilization ratios
-        """
-        try:
-            # Get utilization ratios for the group
-            # The GetSummaryResults API returns a tuple with the following structure:
-            # (number_items, frame_names, ratios, ratio_types, locations, combo_names, error_summary, warning_summary, status)
-            ret = self._model.DesignSteel.GetSummaryResults(
-                group_name,
-                0,  # number_items (will be populated in results)
-                [],  # frame_names (will be populated in results)
-                [],  # ratios (will be populated in results)
-                [],  # ratio_types (will be populated in results)
-                [],  # locations (will be populated in results)
-                [],  # combo_names (will be populated in results)
-                [],  # error_summary (will be populated in results)
-                [],  # warning_summary (will be populated in results)
-                1   # ItemType = Group
-            )
-            
-            # Parse the return value - last element (index 8) is the status code
-            status_code = ret[8]
-            if status_code != 0:  # Status code (0 = success)
-                logger.warning(f"No utilization results found for group: {group_name}, error code: {status_code}")
-                return []
-                
-            # Extract data from the returned tuple
-            number_items = ret[0]  # First element is the number of items
-            frame_names = ret[1]
-            ratios = ret[2]
-            ratio_types = ret[3]
-            locations = ret[4]
-            combo_names = ret[5]
-            error_summary = ret[6]
-            warning_summary = ret[7]
-            
-            # Check if we have valid data
-            if not frame_names or not ratios:
-                logger.warning(f"No utilization results found for group: {group_name}")
-                return []
-                
-            # Log any errors or warnings
-            for i, error in enumerate(error_summary):
-                if error and error.strip():
-                    logger.error(f"Design error for {frame_names[i]}: {error}")
-            
-            for i, warning in enumerate(warning_summary):
-                if warning and warning.strip():
-                    logger.warning(f"Design warning for {frame_names[i]}: {warning}")
-            
-            # Calculate statistics
-            avg_ratio = sum(ratios) / len(ratios) if ratios else 0
-            max_ratio = max(ratios) if ratios else 0
-            min_ratio = min(ratios) if ratios else 0
-            
-            # Get index of max utilized frame
-            max_index = ratios.index(max_ratio) if ratios else -1
-            
-            # Log group summary
-            logger.info(f"{group_name} Utilization Summary:")
-            logger.info(f"  Total Members: {number_items}")
-            logger.info(f"  Average Utilization: {avg_ratio:.3f}")
-            logger.info(f"  Maximum Utilization: {max_ratio:.3f}")
-            logger.info(f"  Minimum Utilization: {min_ratio:.3f}")
-            
-            # Log most utilized frame details
-            if max_index >= 0:
-                max_frame = frame_names[max_index]
-                max_ratio_type = ratio_types[max_index]
-                max_combo = combo_names[max_index]
-                max_location = locations[max_index]
-                
-                # Get ratio type description
-                ratio_type_desc = "Unknown"
-                if max_ratio_type == 1:
-                    ratio_type_desc = "PMM"
-                elif max_ratio_type == 2:
-                    ratio_type_desc = "Major shear"
-                elif max_ratio_type == 3:
-                    ratio_type_desc = "Minor shear"
-                elif max_ratio_type == 4:
-                    ratio_type_desc = "Major beam-column capacity"
-                elif max_ratio_type == 5:
-                    ratio_type_desc = "Minor beam-column capacity"
-                elif max_ratio_type == 6:
-                    ratio_type_desc = "Other"
-                
-                # Get section information
-                section_name, auto_list, _ = self._model.FrameObj.GetSection(max_frame)
-                
-                logger.info(f"  Most Utilized {frame_type}:")
-                logger.info(f"    Frame: {max_frame}")
-                logger.info(f"    Section: {section_name}")
-                logger.info(f"    Utilization: {max_ratio:.3f}")
-                logger.info(f"    Controlling Type: {ratio_type_desc}")
-                logger.info(f"    Location: {max_location} ft from start")
-                logger.info(f"    Combo: {max_combo}")
-            
-            # Find and log underutilized frames (under 50% utilization)
-            underutilized = [(frame_names[i], ratios[i]) for i in range(len(ratios)) if ratios[i] < 0.5]
-            
-            if underutilized:
-                logger.info(f"  Underutilized {frame_type}s (below 50%):")
-                for frame, ratio in sorted(underutilized, key=lambda x: x[1]):
-                    section, _, _ = self._model.FrameObj.GetSection(frame)
-                    logger.info(f"    {frame}: {ratio:.3f} (Section: {section})")
-                    
-                # Recommendation for potential regrouping
-                if len(underutilized) > 2:
-                    logger.info(f"  Recommendation: Consider regrouping {len(underutilized)} {frame_type.lower()}s with low utilization")
-            
-            return underutilized
-        
-        except Exception as e:
-            logger.error(f"Error in analyze_group_utilization: {str(e)}")
-            logger.error(f"Stack trace: {traceback.format_exc()}")
-            return []
-
 class SAPTest:
     def __init__(self):
         self.sap_object = None
@@ -935,15 +716,15 @@ class SAPTest:
         # 1. A model with defined frames and joints are already loaded into sap and connected to the script and available through self.sap_model!
         # Step 1: Add base restraints to all ground level columns.
         # This code identifies the ground level columns and restrains them with no translation, but free to rotate.
-        restraints = [True, True, True, False, False, False]
-        restrained_joints, restraint_status = self.sap_model.add_base_restraints(restraints)
+        restrained_joints, restraint_status = self.sap_model.add_base_restraints()
+        
         # Step 2: Create floor areas and add dead and live loads to them.
         # substep: add dead and live load patterns definitions  
-        self.sap_model.LoadPatterns.Add("DEAD", 1, 1.0)  # 1 is eLoadPatternType_Dead
-        self.sap_model.LoadPatterns.Add("LIVE", 3, 0.0)  # 3 is eLoadPatternType_Live
+        self.sap_model.LoadPatterns.Add("DEAD", int(SAP2000.eLoadPatternType_Dead), 1.0)
+        self.sap_model.LoadPatterns.Add("LIVE", int(SAP2000.eLoadPatternType_Live), 0.0)
 
         # substep: identify all the floor levels.
-        floor_levels, floor_status = self.sap_model.identify_floor_levels()
+        floor_levels, floor_status = sap_test.sap_model.identify_floor_levels()
         for i, floor_level in enumerate(floor_levels):
             # Check if this is the roof level since it needs a different load value
             is_roof = (i == len(floor_levels) - 1)
@@ -974,139 +755,235 @@ class SAPTest:
         beams_by_length = self.sap_model.get_beams_info()
         print(f"beams by length: {beams_by_length}")
         
-        # Define auto-select lists for beams based on length
-        beam_auto_select_lists = {
-            "24ft Beams": ["W24X76", "W24X84", "W24X94", "W24X103", "W24X117"],
-            "22ft Beams": ["W21X44", "W21X50", "W21X57", "W21X68", "W21X83"], 
-            "18ft Beams": ["W18X40", "W18X46", "W18X50", "W18X55", "W18X60"],
-            "14ft Beams": ["W14X34", "W14X38", "W14X43", "W14X48", "W14X53"],
-            "10ft Beams": ["W10X33", "W10X39", "W10X45", "W10X49", "W10X54"]
+        # **Important: separate call**: Now based on the above printed beams by length, we can create a dictionary of beam sections.
+        # the below codes are based on assumptions that the beam lengths are 24ft, 22ft, 18ft, 14ft, and 10ft.
+        # The below code should be a separate function call! do not include in your current script. 
+        # based on the above printed beams by length, we can create a dictionary of beam sections.
+        # Modified to include two options for each beam length (lighter and heavier options)
+        beam_section_options = {
+            "24ft Beams": ["W24X76", "W24X84"],  # Lighter and heavier options
+            "22ft Beams": ["W21X44", "W21X50"],
+            "18ft Beams": ["W18X40", "W18X46"],
+            "14ft Beams": ["W14X34", "W14X38"],
+            "10ft Beams": ["W10X33", "W10X39"]
         }
     
-        # Step 1: Import all section properties first
-        for group_name, section_list in beam_auto_select_lists.items():
-            for section in section_list:
-                ret = self.sap_model.PropFrame.ImportProp(
-                    section,
-                    "A992Fy50",
-                    "AISC16.xml",
-                    section
-                )
-                if ret != 0:
-                    logger.warning(f"Failed to import section {section}")
-
-        # Step 2 & 3: Create auto-select lists and assign to beam groups
+        # Now we can assign the sections to the beams with auto-selection between two options
+        print("\n" + "="*80)
+        print("STARTING AUTO-SELECTION PROCESS")
+        print("="*80)
+        
+        auto_select_results = {
+            "success_count": 0,
+            "failure_count": 0,
+            "beams_upgraded": 0,
+            "beams_kept_lighter": 0,
+            "group_results": {}
+        }
+        
         for length, frames in beams_by_length.items():
             group_name = f"{int(length)}ft Beams"
-            if group_name in beam_auto_select_lists:
-                # Create group and assign frames
-                self.sap_model.create_assign_section_group(
-                    group_name=group_name,
-                    frames=frames
-                )
+            
+            print(f"\n{'-'*30}")
+            print(f"PROCESSING BEAM GROUP: {group_name}")
+            print(f"Number of beams in group: {len(frames)}")
+            
+            if group_name in beam_section_options:
+                section_options = beam_section_options[group_name]
+                print(f"Section options for this group: {section_options[0]} (lighter) and {section_options[1]} (heavier)")
                 
-                # Create the auto-select list
-                section_list = beam_auto_select_lists[group_name]
-                auto_list_name = f"AUTO_{group_name}"
-                ret = self.sap_model.PropFrame.SetAutoSelectSteel(
-                    auto_list_name,
-                    len(section_list),
-                    section_list,
-                    section_list[0]  # Start with smallest section
-                )
+                group_results = {
+                    "beams_count": len(frames),
+                    "beams_upgraded": 0,
+                    "beams_kept_lighter": 0,
+                    "analysis_success": False,
+                    "beam_details": {}
+                }
                 
-                # Assign the auto-select list to the group
-                ret = self.sap_model.FrameObj.SetSection(group_name, auto_list_name, 1)  # 1 = apply to group
-                logger.info(f"Assigned auto-select list {auto_list_name} to {group_name}")
+                try:
+                    # Create a group for these beams
+                    print(f"Creating and assigning section group '{group_name}'...")
+                    ret = self.sap_model.create_assign_section_group(
+                        group_name=group_name,
+                        frames=frames
+                    )
+                    
+                    if ret != 0:
+                        print(f"WARNING: Group creation returned code {ret}")
+                    
+                    # Import both section options
+                    print(f"Importing section properties...")
+                    for section in section_options:
+                        ret = self.sap_model.PropFrame.ImportProp(
+                            section,
+                            "A992Fy50",
+                            "AISC16.xml",
+                            section
+                        )
+                        if ret != 0:
+                            print(f"WARNING: Section import for {section} returned code {ret}")
+                    
+                    # Simple Auto Select process:
+                    # 1. First assign the lighter section to all beams in the group
+                    print(f"Step 1: Assigning initial lighter section ({section_options[0]}) to all beams...")
+                    ret = self.sap_model.FrameObj.SetSection(group_name, section_options[0], 1)
+                    if ret != 0:
+                        print(f"WARNING: Initial section assignment returned code {ret}")
+                    
+                    # 2. Run a preliminary analysis to check utilization
+                    print(f"Step 2: Running preliminary analysis...")
+                    ret = self.sap_model.Analyze.RunAnalysis()
+                    if ret != 0:
+                        print(f"ERROR: Analysis failed with code {ret}")
+                        raise Exception(f"Analysis failed with code {ret}")
+                    else:
+                        print(f"Analysis completed successfully")
+                        group_results["analysis_success"] = True
+                    
+                    # 3. Check utilization for each beam in the group
+                    print(f"Step 3: Checking utilization for each beam and optimizing sections...")
+                    
+                    for i, frame in enumerate(frames):
+                        print(f"\n  Beam {i+1}/{len(frames)}: {frame}")
+                        # Get beam forces
+                        obj_stat, elm_stat, point_count, forces = self.sap_model.Results.FrameForce(
+                            frame, "DEAD", 0, 5  # 5 sample points along beam
+                        )
+                        
+                        beam_result = {
+                            "frame_id": frame,
+                            "analysis_success": obj_stat == 0,
+                            "max_moment": 0,
+                            "utilization": 0,
+                            "final_section": section_options[0]  # default
+                        }
+                        
+                        # Find maximum moment
+                        if obj_stat == 0:
+                            max_moment = 0
+                            max_moment_location = 0
+                            print(f"    Force results obtained successfully")
+                            
+                            # Print forces at each point
+                            print(f"    Station  |  Moment  ")
+                            print(f"    ---------|---------")
+                            
+                            for j in range(point_count):
+                                station = forces[0][j]
+                                moment = abs(forces[6][j])  # Moment3 is typically the major axis bending
+                                print(f"    {station:7.3f} | {moment:7.3f}")
+                                
+                                if moment > max_moment:
+                                    max_moment = moment
+                                    max_moment_location = station
+                            
+                            print(f"    Maximum moment: {max_moment:.3f} at station {max_moment_location:.3f}")
+                            beam_result["max_moment"] = max_moment
+                            
+                            try:
+                                # Get section properties for utilization calculation
+                                section_props_ret = self.sap_model.PropFrame.GetSectProps(section_options[0])
+                                if len(section_props_ret) < 4:
+                                    print(f"    WARNING: Could not get section properties, returned: {section_props_ret}")
+                                    continue
+                                    
+                                section_props = section_props_ret[:-1]  # Exclude return code
+                                S_x = section_props[2]  # Elastic section modulus
+                                print(f"    Section {section_options[0]} properties - Section modulus: {S_x:.3f}")
+                                
+                                # Calculate stress
+                                if S_x > 0:
+                                    stress = max_moment / S_x
+                                    allowable_stress = 50 * 0.66  # 0.66Fy for steel, assuming Fy=50 ksi
+                                    utilization = stress / allowable_stress
+                                    beam_result["utilization"] = utilization
+                                    
+                                    print(f"    Stress calculation: {max_moment:.2f}/{S_x:.2f} = {stress:.2f} ksi")
+                                    print(f"    Allowable stress: {allowable_stress:.2f} ksi")
+                                    print(f"    Utilization ratio: {utilization:.3f} (threshold: 0.75)")
+                                    
+                                    # If utilization is over 75%, use the heavier section
+                                    if utilization > 0.75:
+                                        print(f"    Decision: UPGRADE to {section_options[1]} (utilization > 0.75)")
+                                        ret = self.sap_model.FrameObj.SetSection(frame, section_options[1], 0)
+                                        if ret == 0:
+                                            print(f"    Section upgraded successfully")
+                                            beam_result["final_section"] = section_options[1]
+                                            auto_select_results["beams_upgraded"] += 1
+                                            group_results["beams_upgraded"] += 1
+                                        else:
+                                            print(f"    WARNING: Section upgrade failed with code {ret}")
+                                    else:
+                                        print(f"    Decision: KEEP {section_options[0]} (utilization <= 0.75)")
+                                        auto_select_results["beams_kept_lighter"] += 1
+                                        group_results["beams_kept_lighter"] += 1
+                                else:
+                                    print(f"    WARNING: Invalid section modulus: {S_x}")
+                            except Exception as e:
+                                print(f"    ERROR during section analysis: {str(e)}")
+                                auto_select_results["failure_count"] += 1
+                        else:
+                            print(f"    WARNING: Could not get frame forces, status code: {obj_stat}")
+                            auto_select_results["failure_count"] += 1
+                        
+                        # Store beam results
+                        group_results["beam_details"][frame] = beam_result
+                    
+                    auto_select_results["success_count"] += 1
+                    print(f"\nGroup results: {group_results['beams_upgraded']} beams upgraded, {group_results['beams_kept_lighter']} kept lighter section")
+                    
+                except Exception as e:
+                    print(f"ERROR processing group {group_name}: {str(e)}")
+                    auto_select_results["failure_count"] += 1
+                
+                # Store group results
+                auto_select_results["group_results"][group_name] = group_results
+            else:
+                print(f"No section options defined for group {group_name} - skipping")
+        
+        # Print summary of auto-selection process
+        print("\n" + "="*80)
+        print("AUTO-SELECTION SUMMARY")
+        print("="*80)
+        print(f"Total groups processed: {auto_select_results['success_count'] + auto_select_results['failure_count']}")
+        print(f"Successful groups: {auto_select_results['success_count']}")
+        print(f"Failed groups: {auto_select_results['failure_count']}")
+        print(f"Total beams upgraded to heavier sections: {auto_select_results['beams_upgraded']}")
+        print(f"Total beams kept with lighter sections: {auto_select_results['beams_kept_lighter']}")
+        print("="*80 + "\n")
 
         # Step4: Create Column section groups and assign sections to them.
         # substep: get column information by location since we group columns based on the location
         columns_by_location = self.sap_model.get_columns_info()
         print(f"columns by location: {columns_by_location}")
 
-        # Define auto-select lists for columns based on location
-        column_auto_select_lists = {
-            "corner": ["W10X12", "W10X15", "W10X19", "W10X22", "W10X26"],
-            "edge": ["W12X190", "W12X210", "W12X230", "W12X252", "W12X279"],
-            "interior": ["W14X193", "W14X211", "W14X233", "W14X257", "W14X283"]
+        # **Important: separate call**: Now based on the above printed columns by location, we can create a dictionary of column sections.
+        # the below codes are based on assumptions that the column locations are corner, edge, and interior.
+        column_sections = {
+            "corner": "W10X12",
+            "edge": "W12X190",
+            "interior": "W14X193"
         }
-        
-        # Step 1: Import all column section properties
-        for location, section_list in column_auto_select_lists.items():
-            for section in section_list:
-                ret = self.sap_model.PropFrame.ImportProp(
-                    section,
-                    "A992Fy50",
-                    "AISC16.xml",
-                    section
-                )
-                if ret != 0:
-                    logger.warning(f"Failed to import section {section}")
-                    
-        # Step 2 & 3: Create auto-select lists and assign to column groups
-        for location, frames in columns_by_location.items():
+        # Assign column sections
+        for location, section in column_sections.items():
             group_name = f"{location.capitalize()} Columns"
             # Create group and assign frames
             self.sap_model.create_assign_section_group(
                 group_name=group_name,
-                frames=frames
+                frames=columns_by_location[location]
             )
-            
-            # Create the auto-select list
-            section_list = column_auto_select_lists[location]
-            auto_list_name = f"AUTO_{group_name}"
-            ret = self.sap_model.PropFrame.SetAutoSelectSteel(
-                auto_list_name,
-                len(section_list),
-                section_list,
-                section_list[0]  # Start with smallest section
+            ret = self.sap_model.PropFrame.ImportProp(
+                section,
+                "A992Fy50",
+                "AISC16.xml",
+                section
             )
-            
-            # Assign the auto-select list to the group
-            ret = self.sap_model.FrameObj.SetSection(group_name, auto_list_name, 1)  # 1 = apply to group
-            logger.info(f"Assigned auto-select list {auto_list_name} to {group_name}")
+            ret = self.sap_model.FrameObj.SetSection(group_name, section, 1)
         
         # Step 5: Run the analysis.
-        # Important: Always save the model before running the analysis.
+        # Important: Allways save the model before running the analysis.
         self.sap_model.File.Save(self.model_path)
         self.sap_model.Analyze.RunAnalysis()
-        
-        # Step 6: Run Steel Design to select optimal sections from auto-select lists
-        # Set the design code explicitly before running design
-        self.sap_model.DesignSteel.SetCode("AISC 360-16")
-        ret = self.sap_model.DesignSteel.StartDesign() #"AISC 360-16"
-        
-        # Step 7: Check final selected sections and analyze utilization ratios
-        # First, get basic section information for a sample of frames
-        for length, frames in beams_by_length.items():
-            if frames:
-                group_name = f"{int(length)}ft Beams"
-                sample_frame = frames[0]
-                section_name, auto_list, ret = self.sap_model.FrameObj.GetSection(sample_frame)
-                logger.info(f"Sample {group_name}: {sample_frame} - Selected section: {section_name} (from Auto List: {auto_list})")
-                
-        for location, frames in columns_by_location.items():
-            if frames:
-                sample_frame = frames[0]
-                section_name, auto_list, ret = self.sap_model.FrameObj.GetSection(sample_frame)
-                logger.info(f"Sample {location} column: {sample_frame} - Selected section: {section_name} (from Auto List: {auto_list})")
-        
-        # Now add detailed utilization ratio analysis for each group
-        logger.info("==== UTILIZATION RATIO ANALYSIS ====")
-        
-        # Analyze beam groups
-        for length, frames in beams_by_length.items():
-            if frames:
-                group_name = f"{int(length)}ft Beams"
-                self.sap_model.analyze_group_utilization(group_name, "Beam")
-        
-        # Analyze column groups
-        for location in columns_by_location.keys():
-            if columns_by_location[location]:
-                group_name = f"{location.capitalize()} Columns"
-                self.sap_model.analyze_group_utilization(group_name, "Column")
-        
-        return True
 
 if __name__ == "__main__":
     sap_test = SAPTest()
