@@ -230,8 +230,8 @@ class CustomSAP2000Model:
                 dy = y_j - y_i
                 angle = math.degrees(math.atan2(dy, dx)) % 360
                 
-                # Log warning for very small angles
-                if abs(angle) < 5 or abs(angle - 180) < 5:
+                # Log warning only for very small non-zero angles
+                if (0 < abs(angle) < 5) or (175 < abs(angle) < 180):
                     logger.warning(f"Very small angle detected in beam {frame_name}: {angle:.2f}°")
                 
                 coplanar_beams.append({
@@ -535,18 +535,22 @@ class CustomSAP2000Model:
                 
             # Create the area with a unique name
             area_name = f"FloorArea_{i+1}"
+            
+            # The AddByCoord function returns a status code
             ret = self._model.AreaObj.AddByCoord(
                 len(x_array),
                 x_array,
                 y_array,
                 z_array,
-                area_name
+                area_name  # This is the name we're providing to SAP2000
             )
             
             if ret != 0:
-                logger.error(f"Failed to create area for face {i} (status: {ret})")
-                continue
-                
+                logger.error(f"Failed to create area (status: {ret})")
+                continue  # Skip to the next area
+            else:
+                logger.info(f"Created area {area_name}")
+            
             # Calculate and set optimal local axis angle
             optimal_angle = get_optimal_axis_angle(face)
             ret = self._model.AreaObj.SetLocalAxes(area_name, optimal_angle)
