@@ -1,1 +1,3 @@
 comtypes
+numpy
+scipy

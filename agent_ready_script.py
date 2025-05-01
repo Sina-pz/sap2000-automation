@@ -73,34 +73,62 @@ class CustomSAP2000Model:
 
             # Find and restrain ground-level column bases
             restrained_points = []
+            
+            # Create a dictionary to store point coordinates for quick reference
+            point_coords = {}
+            for point_name in point_names:
+                x, y, z, ret = self._model.PointObj.GetCoordCartesian(point_name)
+                if ret == 0:
+                    point_coords[point_name] = (x, y, z)
+            
+            # Find vertical members (columns)
             for frame_name in frame_names:
                 point_i, point_j, ret = self._model.FrameObj.GetPoints(frame_name)
                 if ret != 0:
                     continue
 
                 # Get coordinates of both points
-                x_i, y_i, z_i, ret_i = self._model.PointObj.GetCoordCartesian(point_i)
-                x_j, y_j, z_j, ret_j = self._model.PointObj.GetCoordCartesian(point_j)
-                
-                if ret_i != 0 or ret_j != 0:
+                if point_i not in point_coords or point_j not in point_coords:
                     continue
-
-                # Determine which point is the bottom point
-                bottom_point = point_i if z_i < z_j else point_j
-                top_point = point_j if z_i < z_j else point_i
-
-                # Check if this is a ground-level column by verifying no frames connect to the bottom point
-                if len(point_connections[bottom_point]) == 1:  # Only connected to current frame
-                    _, ret = self._model.PointObj.SetRestraint(bottom_point, restraints)
+                
+                x_i, y_i, z_i = point_coords[point_i]
+                x_j, y_j, z_j = point_coords[point_j]
+                
+                # Check if this is a vertical member (column)
+                if abs(x_i - x_j) < 0.1 and abs(y_i - y_j) < 0.1 and abs(z_i - z_j) > 0.1:
+                    # Determine which point is the bottom point
+                    bottom_point = point_i if z_i < z_j else point_j
+                    bottom_x, bottom_y, bottom_z = point_coords[bottom_point]
                     
-                    if ret == 0:
-                        restrained_points.append(bottom_point)
-                        logger.info(f"Applied restraints to ground-level column base {bottom_point} "
-                                  f"at coordinates ({x_i if bottom_point == point_i else x_j}, "
-                                  f"{y_i if bottom_point == point_i else y_j}, "
-                                  f"{z_i if bottom_point == point_i else z_j})")
-                    else:
-                        logger.warning(f"Failed to apply restraints to point {bottom_point}")
+                    # Check if this is a ground-level column by checking if there's any other column below it
+                    has_column_below = False
+                    for connected_frame in point_connections[bottom_point]:
+                        if connected_frame == frame_name:
+                            continue  # Skip the current frame
+                            
+                        other_point = None
+                        pt_i, pt_j, ret = self._model.FrameObj.GetPoints(connected_frame)
+                        if ret == 0:
+                            other_point = pt_j if pt_i == bottom_point else pt_i
+                            
+                        if other_point and other_point in point_coords:
+                            other_x, other_y, other_z = point_coords[other_point]
+                            
+                            # Check if the other point is below this point (lower Z)
+                            if abs(other_x - bottom_x) < 0.1 and abs(other_y - bottom_y) < 0.1 and other_z < bottom_z:
+                                has_column_below = True
+                                break
+                    
+                    # Only restrain if there's no column below
+                    if not has_column_below:
+                        _, ret = self._model.PointObj.SetRestraint(bottom_point, restraints)
+                        
+                        if ret == 0:
+                            restrained_points.append(bottom_point)
+                            logger.info(f"Applied restraints to ground-level column base {bottom_point} "
+                                      f"at coordinates ({bottom_x}, {bottom_y}, {bottom_z})")
+                        else:
+                            logger.warning(f"Failed to apply restraints to point {bottom_point}")
 
             logger.info(f"Successfully restrained {len(restrained_points)} ground-level column bases")
             return (restrained_points, 0)
@@ -407,8 +435,13 @@ class CustomSAP2000Model:
                 unique_face_sets.add(face_set)
                 unique_faces.append(face)
         
-        logger.info(f"Found {len(all_faces)} total faces, filtered to {len(unique_faces)} unique valid faces")
-        return unique_faces
+        # Filter for exactly 4 vertices (quadrilaterals)
+        quadrilateral_faces = [face for face in unique_faces if len(face) == 4]
+        
+        logger.info(f"Found {len(all_faces)} total faces, filtered to {len(unique_faces)} unique valid faces, "
+                   f"and {len(quadrilateral_faces)} quadrilateral faces")
+        
+        return quadrilateral_faces
         
     def _trace_face(self, start_v, next_v, sorted_neighbors, visited_half_edges):
         """
@@ -500,8 +533,8 @@ class CustomSAP2000Model:
             # Calculate length and angle for each edge
             for i in range(len(face_vertices)):
                 j = (i + 1) % len(face_vertices)
-                v1 = vertex_map[face_vertices[i]]
-                v2 = vertex_map[face_vertices[j]]
+                v1 = vertex_coords[face_vertices[i]]
+                v2 = vertex_coords[face_vertices[j]]
                 
                 dx = v2[0] - v1[0]
                 dy = v2[1] - v1[1]
@@ -534,32 +567,39 @@ class CustomSAP2000Model:
                 continue
                 
             # Create the area with a unique name
-            area_name = f"FloorArea_{i+1}"
-            
-            # The AddByCoord function returns a status code
             ret = self._model.AreaObj.AddByCoord(
                 len(x_array),
                 x_array,
                 y_array,
                 z_array,
-                area_name  # This is the name we're providing to SAP2000
+                ""  # Auto name
             )
             
-            if ret != 0:
-                logger.error(f"Failed to create area (status: {ret})")
-                continue  # Skip to the next area
-            else:
-                logger.info(f"Created area {area_name}")
+            area_name = ret[3] if len(ret) > 3 else f"Area_{i+1}"
+            created_areas.append(area_name)
             
             # Calculate and set optimal local axis angle
             optimal_angle = get_optimal_axis_angle(face)
+            logger.info(f"Attempting to set local axes for area {area_name} with angle {optimal_angle:.2f}°")
+            
+            # Log the area properties before setting local axes
+            try:
+                num_points, points, ret = self._model.AreaObj.GetPoints(area_name)
+                logger.info(f"Area {area_name} has {num_points} points")
+                if ret == 0:
+                    logger.info(f"Area {area_name} points: {points}")
+            except Exception as e:
+                logger.warning(f"Could not get points for area {area_name}: {str(e)}")
+            
+            # Try to set local axes
             ret = self._model.AreaObj.SetLocalAxes(area_name, optimal_angle)
             
             if ret != 0:
-                logger.warning(f"Failed to set local axes for area {area_name}")
+                logger.warning(f"Failed to set local axes for area {area_name}. Error code: {ret}")
+                logger.warning(f"Area coordinates: X={x_array}, Y={y_array}, Z={z_array}")
+                logger.warning(f"Calculated optimal angle: {optimal_angle:.2f}°")
             else:
-                logger.info(f"Created area {area_name} with local axis angle {optimal_angle:.1f}° (aligned with shortest span)")
-                created_areas.append(area_name)
+                logger.info(f"Successfully set local axes for area {area_name} with angle {optimal_angle:.2f}°")
         
         logger.info(f"Successfully created {len(created_areas)} areas out of {len(faces)} faces")
         return created_areas
@@ -981,9 +1021,12 @@ class SAPTest:
         # Define auto-select lists for beams based on length
         beam_auto_select_lists = {
             "24ft Beams": ["W24X76", "W24X84", "W24X94", "W24X103", "W24X117"],
-            "22ft Beams": ["W21X44", "W21X50", "W21X57", "W21X68", "W21X83"], 
+            "22ft Beams": ["W21X44", "W21X50", "W21X57", "W21X68", "W21X83"],
+            "20ft Beams": ["W21X44", "W21X50", "W21X57", "W21X68", "W21X83"],
+            "15ft Beams": ["W18X35", "W18X40", "W18X46", "W18X50", "W18X55"],
             "18ft Beams": ["W18X40", "W18X46", "W18X50", "W18X55", "W18X60"],
             "14ft Beams": ["W14X34", "W14X38", "W14X43", "W14X48", "W14X53"],
+            "12ft Beams": ["W12X26", "W12X30", "W12X35", "W12X40", "W12X45"],
             "10ft Beams": ["W10X33", "W10X39", "W10X45", "W10X49", "W10X54"]
         }
     
