@@ -173,7 +173,98 @@ class CustomSAP2000Model:
             logger.error(f"Stack trace: {traceback.format_exc()}")
             return ([], 1)
 
-    def add_floor_areas(self, floor_z, tolerance=0.01) -> tuple:
+    def _map_to_floor(self, z_coord, floor_levels):
+        """
+        Maps a given z-coordinate to the appropriate floor level.
+        The coordinate is mapped to the highest floor that is below or equal to it.
+        
+        Args:
+            z_coord: The z-coordinate to map
+            floor_levels: List of available floor levels (sorted ascending)
+            
+        Returns:
+            float: The appropriate floor level
+        """
+        if not floor_levels:
+            return z_coord
+            
+        # Sort floors in ascending order
+        sorted_floors = sorted(floor_levels)
+        
+        # If z is exactly on a floor, use that floor
+        if z_coord in sorted_floors:
+            return z_coord
+            
+        # Find the highest floor that's below this z-coordinate
+        floor_below = None
+        for floor in sorted_floors:
+            if floor > z_coord:
+                break
+            floor_below = floor
+            
+        # If no floor below (z is below ground floor), use ground floor
+        if floor_below is None:
+            return sorted_floors[0]
+            
+        return floor_below
+
+    def _is_reserved_area(self, area_vertices, reserved_coords, floor_levels=None):
+        """
+        Check if an area contains any of the reserved coordinates.
+        
+        Args:
+            area_vertices: List of (x,y,z) coordinates defining the area vertices
+            reserved_coords: List of (x,y,z) tuples where None means "apply to all"
+            floor_levels: List of actual floor levels in the building
+            
+        Returns:
+            bool: True if area should be reserved, False otherwise
+        """
+        # Extract x,y coordinates of area vertices
+        polygon_vertices = [(v[0], v[1]) for v in area_vertices]
+        
+        # Get z coordinate of this area (should be same for all vertices)
+        area_z = area_vertices[0][2]
+        
+        for rx, ry, rz in reserved_coords:
+            # Check if z coordinate matches (or is None/wildcard)
+            if rz is not None:
+                if floor_levels:
+                    # Map the input z-coordinate to appropriate floor level
+                    mapped_z = self._map_to_floor(rz, floor_levels)
+                    logger.info(f"Mapping z-coordinate {rz} to floor level {mapped_z}")
+                    if abs(mapped_z - area_z) > 0.01:
+                        continue
+                else:
+                    # Fall back to exact matching if floor_levels not provided
+                    if abs(rz - area_z) > 0.01:
+                        continue
+            
+            # If x or y is None, we need to check if any point in that coordinate would make this a reserved area
+            if rx is None or ry is None:
+                x_coords = [v[0] for v in area_vertices]
+                y_coords = [v[1] for v in area_vertices]
+                min_x, max_x = min(x_coords), max(x_coords)
+                min_y, max_y = min(y_coords), max(y_coords)
+                
+                if rx is None and ry is not None:
+                    if min_y <= ry <= max_y:
+                        return True
+                        
+                elif ry is None and rx is not None:
+                    if min_x <= rx <= max_x:
+                        return True
+                        
+                elif rx is None and ry is None:
+                    return True
+                    
+            else:
+                if self._point_in_polygon(rx, ry, polygon_vertices):
+                    return True
+                    
+        return False
+
+    def add_floor_areas(self, floor_z, tolerance=0.01, reserved_coords=None) -> tuple:
         """
         Add floor areas at the specified elevation by detecting enclosed polygons in the floor structural grid.
         Uses a graph-based approach with face traversal algorithm. Does not add loads.
@@ -181,12 +272,17 @@ class CustomSAP2000Model:
         Args:
             floor_z: Floor elevation to create areas for
             tolerance: Coordinate comparison tolerance
+            reserved_coords: List of (x,y,z) tuples where None means "apply to all"
+                           representing reserved locations (e.g. elevators, stairs)
             
         Returns:
             tuple: (list of created area names, status code)
                   where status code is 0 for success, 1 for failure
         """
         try:
+            # Get all floor levels first
+            floor_levels, _ = self.identify_floor_levels()
+            
             # Get all beams at this floor level
             horizontal_beams = self._get_coplanar_beams_at_elevation(floor_z, tolerance)
             
@@ -208,6 +304,23 @@ class CustomSAP2000Model:
                 return ([], 0)  # Not an error, just no areas created
                 
             # Create area objects in SAP2000 (without loads)
+            # First get vertex coordinates for each face
+            vertex_coords = {v: coords for coords, v in vertex_map.items()}
+            
+            # Filter out reserved areas if coordinates are provided
+            if reserved_coords:
+                non_reserved_faces = []
+                for face in faces:
+                    face_coords = [vertex_coords[v] for v in face]
+                    # Pass floor_levels to _is_reserved_area
+                    if not self._is_reserved_area(face_coords, reserved_coords, floor_levels):
+                        non_reserved_faces.append(face)
+                        
+                if len(non_reserved_faces) < len(faces):
+                    logger.info(f"Filtered out {len(faces) - len(non_reserved_faces)} reserved areas at z={floor_z}")
+                faces = non_reserved_faces
+            
+            # Create the remaining areas
             created_areas = self._create_areas_without_loads(faces, vertex_map, floor_z)
             
             logger.info(f"Created {len(created_areas)} floor areas at elevation z={floor_z}")
@@ -937,6 +1050,35 @@ class CustomSAP2000Model:
             logger.error(f"Stack trace: {traceback.format_exc()}")
             return []
 
+    def _point_in_polygon(self, x, y, polygon_vertices):
+        """
+        Check if a point (x,y) lies within a polygon defined by its vertices.
+        Uses ray casting algorithm.
+        
+        Args:
+            x, y: Coordinates of the point to check
+            polygon_vertices: List of (x,y) tuples defining the polygon vertices
+            
+        Returns:
+            bool: True if point is inside polygon, False otherwise
+        """
+        n = len(polygon_vertices)
+        inside = False
+        
+        p1x, p1y = polygon_vertices[0]
+        for i in range(n + 1):
+            p2x, p2y = polygon_vertices[i % n]
+            if y > min(p1y, p2y):
+                if y <= max(p1y, p2y):
+                    if x <= max(p1x, p2x):
+                        if p1y != p2y:
+                            xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                        if p1x == p2x or x <= xinters:
+                            inside = not inside
+            p1x, p1y = p2x, p2y
+        
+        return inside
+
 class SAPTest:
     def __init__(self):
         self.sap_object = None
@@ -977,10 +1119,20 @@ class SAPTest:
     def run_sap_script(self) -> bool:
         # Pre-requisitite (you can assume its done):
         # 1. A model with defined frames and joints are already loaded into sap and connected to the script and available through self.sap_model!
+        
+        # Define reserved locations (example)
+        # Format: [(x, y, z)] where None means "apply to all"
+        # Example: [(10, None, None)] means reserve shaft at x=10 for all y coordinates and all floors
+        reserved_coords = [
+            (12, -8.5, 22),  # Reserved shaft at x=10, y=-7.5, all floors
+            (-5, 8.5, None)   # Reserved shaft at x=-10, y=7.5, all floors
+        ]
+        
         # Step 1: Add base restraints to all ground level columns.
         # This code identifies the ground level columns and restrains them with no translation, but free to rotate.
         restraints = [True, True, True, False, False, False]
         restrained_joints, restraint_status = self.sap_model.add_base_restraints(restraints)
+        
         # Step 2: Create floor areas and add dead and live loads to them.
         # substep: add dead and live load patterns definitions  
         self.sap_model.LoadPatterns.Add("DEAD", 1, 1.0)  # 1 is eLoadPatternType_Dead
@@ -991,8 +1143,8 @@ class SAPTest:
         for i, floor_level in enumerate(floor_levels):
             # Check if this is the roof level since it needs a different load value
             is_roof = (i == len(floor_levels) - 1)
-            # substep: create floor areas at each floor level.
-            areas, area_status = self.sap_model.add_floor_areas(floor_level)
+            # substep: create floor areas at each floor level, excluding reserved areas
+            areas, area_status = self.sap_model.add_floor_areas(floor_level, reserved_coords=reserved_coords)
             # substep: add dead and live loads to the floor areas.
             for area_name in areas:
                 self.sap_model.AreaObj.SetLoadUniform(
